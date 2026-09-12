@@ -1,0 +1,92 @@
+plugins {
+    id 'java'
+    // Shadow (fat-jar) plugin: lets us bundle only the dependencies the Workato
+    // On-Prem Agent does NOT already provide (see dependencies block below).
+    id 'com.gradleup.shadow' version '9.6.1'
+}
+
+group = 'com.workato.onprem'
+version = '0.1.0'
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+// Matches the opa-extensions reference project (workato/opa-extensions), which requires
+// Java 17 and builds via `./gradlew jar`.
+project.ext {
+    springVersion = '6.1.14'
+    slf4jVersion = '2.0.16'
+    jacksonVersion = '2.18.1'
+    valkeyJavaVersion = '5.5.0'
+    junitVersion = '5.11.3'
+}
+
+repositories {
+    mavenLocal()
+    mavenCentral()
+}
+
+dependencies {
+    // --- Provided by the Workato On-Prem Agent runtime at deploy time ---
+    // The reference SDK (opa-extensions/build.gradle) lists these as `implementation`,
+    // but the Agent process already puts them on its own classpath before ext/ jars are
+    // loaded. Declaring them `compileOnly` here means: compile against them, but do NOT
+    // shade/bundle a second copy into our jar (which would risk classpath conflicts with
+    // whatever version the Agent ships).
+    compileOnly "org.slf4j:slf4j-api:${slf4jVersion}"
+    compileOnly "jakarta.servlet:jakarta.servlet-api:6.0.0"
+    compileOnly "jakarta.inject:jakarta.inject-api:2.0.1"
+    compileOnly "org.springframework:spring-context:${springVersion}"
+    compileOnly "org.springframework:spring-webmvc:${springVersion}"
+    compileOnly "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
+
+    // --- Extension-specific dependency the Agent does NOT provide ---
+    // This is the whole reason we need a shadow/fat jar instead of the reference repo's
+    // plain `./gradlew jar`: the Valkey client has to travel inside the extension jar we
+    // drop into <Agent install>/ext, or the Agent's classloader will never find it.
+    // slf4j-api is excluded here since it's already supplied above via compileOnly.
+    implementation("io.valkey:valkey-java:${valkeyJavaVersion}") {
+        exclude group: 'org.slf4j', module: 'slf4j-api'
+    }
+
+    // --- Test harness only ---
+    testImplementation "org.junit.jupiter:junit-jupiter:${junitVersion}"
+    testImplementation "org.springframework:spring-test:${springVersion}"
+    testImplementation "org.springframework:spring-webmvc:${springVersion}"
+    testImplementation "org.springframework:spring-context:${springVersion}"
+    testImplementation "jakarta.servlet:jakarta.servlet-api:6.0.0"
+    testImplementation "jakarta.inject:jakarta.inject-api:2.0.1"
+    testImplementation "com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}"
+    testImplementation "org.slf4j:slf4j-simple:${slf4jVersion}"
+    testImplementation "org.hamcrest:hamcrest:2.2"
+    testImplementation "com.jayway.jsonpath:json-path:2.9.0"
+    testRuntimeOnly "org.junit.platform:junit-platform-launcher"
+}
+
+test {
+    useJUnitPlatform()
+    // The test harness exercises ValkeyExtension against a real local Valkey instance
+    // (127.0.0.1:6379 by default) started with `brew services start valkey`. Property
+    // names match what ValkeyExtension reads via Environment.getProperty(...) in config.yml.
+    systemProperty 'valkeyHost', System.getProperty('valkeyHost', '127.0.0.1')
+    systemProperty 'valkeyPort', System.getProperty('valkeyPort', '6379')
+    testLogging {
+        events 'passed', 'skipped', 'failed'
+    }
+}
+
+shadowJar {
+    archiveClassifier.set('') // ship as opa-valkey-extension-<version>.jar, no "-all" suffix
+    mergeServiceFiles()
+}
+
+// The reference SDK's docs say to run `./gradlew jar`, which by itself produces a thin jar
+// (our classes only - no valkey-java, so it won't run standalone once dropped in ext/).
+// We deliberately point shadowJar at that same output path/name so `./gradlew build` (or
+// `./gradlew jar`, since `jar` is shadowJar's input task and always runs first) leaves the
+// single deployable artifact behind: build/libs/opa-valkey-extension-0.1.0.jar, now bundling
+// valkey-java too. Copy that one file into <Agent install>/ext.
+assemble.dependsOn(shadowJar)
+jar.finalizedBy(shadowJar)

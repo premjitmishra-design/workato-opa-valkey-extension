@@ -1,0 +1,19 @@
+# Sample snippet to merge into the Workato On-Prem Agent's conf/config.yml.
+# See workato/opa-extensions README for the full extensions mechanism.
+
+server:
+  # Directory where compiled extension jars are placed. Copy
+  # build/libs/opa-valkey-extension-0.1.0.jar (the shadowJar output) here.
+  classpath: /opt/workato-agent/ext
+
+extensions:
+  valkey:
+    controllerClass: com.workato.onprem.valkey.ValkeyExtension
+    # Connection details for the local Valkey instance.
+    valkeyHost: 127.0.0.1
+    valkeyPort: 6379
+
+# Once loaded, the extension answers at:
+#   GET  http://localhost/ext/valkey/health
+#   POST http://localhost/ext/valkey/get    { "key": "user:1001:name" }
+#   GET  http://localhost/ext/valkey/keys?pattern=user:*
