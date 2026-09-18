@@ -111,7 +111,11 @@ jar tf build/libs/opa-valkey-extension-0.1.0.jar | grep -E 'springframework|fast
 4. Restart the Agent. It will expose:
    - `GET  /ext/valkey/health` - connectivity check
    - `POST /ext/valkey/get` `{"key": "user:1001:name"}` - retrieve any key, type auto-detected
-   - `GET  /ext/valkey/keys?pattern=user:*` - list matching keys
+   - `POST /ext/valkey/set` `{"key": "user:1001:name", "value": "Ada Lovelace", "ttlSeconds": 60}` - create/overwrite a key, optional TTL
+   - `POST /ext/valkey/set-batch` `{"entries": [{"key": "...", "value": "...", "ttlSeconds": 60}, ...]}` - create/overwrite many keys in one call
+   - `GET  /ext/valkey/keys?pattern=user:*` - list matching key names
+   - `GET  /ext/valkey/search?pattern=user:*` - search matching keys and return each one's value
+   - `POST /ext/valkey/semantic-search` `{"index": "idx:docs", "vectorField": "embedding", "vector": [...], "topK": 5}` - vector/KNN similarity search against a [Valkey Search](https://valkey.io/topics/search/) index (requires the valkey-search module and a pre-existing `FT.CREATE`'d vector index)
 
 ## Endpoints
 
@@ -119,10 +123,39 @@ jar tf build/libs/opa-valkey-extension-0.1.0.jar | grep -E 'springframework|fast
 |---|---|---|---|
 | GET | `/health` | - | `{"status": "UP", "pong": "PONG"}` |
 | POST | `/get` | `{"key": "<key>"}` | `{"key", "type", "found", "value"}` (value shape depends on type: string, hash → object, list → array, set → array, zset → `[{member, score}, ...]`) |
+| POST | `/set` | `{"key": "<key>", "value": "<value>", "ttlSeconds": <optional>}` | `{"key", "set": true, "ttlSeconds"}` (`ttlSeconds` present only when supplied) |
+| POST | `/set-batch` | `{"entries": [{"key", "value", "ttlSeconds": <optional>}, ...]}` | `{"keys": [...], "count", "set": true}` (one Valkey pipeline round trip for the whole batch) |
 | GET | `/keys` | `?pattern=<glob>` (default `*`) | `{"pattern", "keys": [...], "count"}` |
+| GET | `/search` | `?pattern=<glob>` (default `*`) | `{"pattern", "entries": [{"key", "type", "found", "value"}, ...], "count"}` |
+| POST | `/semantic-search` | `{"index", "vectorField", "vector": [...], "topK": <optional, default 10>, "returnFields": [...]}` | `{"index", "matches": [{"key", "score", "fields"}, ...], "count"}` (`score` is vector distance - lower is closer) |
 
-A missing/blank `key` on `POST /get` returns `400 {"error": "`key` is required"}` rather than a
-generic 500, via the controller's `@ExceptionHandler`.
+A missing/blank `key` on `POST /get`/`POST /set`, a missing `value` on `POST /set`, a
+non-positive `ttlSeconds`, or an empty/malformed `entries` array on `POST /set-batch` all return
+`400 {"error": "..."}` rather than a generic 500, via the controller's `@ExceptionHandler`.
+
+### Semantic (vector) search
+
+`POST /semantic-search` runs a K-nearest-neighbors query against an index created by the
+[Valkey Search](https://valkey.io/topics/search/) module (`valkey-search`, bundled with Valkey
+8.1+) - the piece that gives Valkey semantic-search capability, analogous to Redis's
+RediSearch/vector sets. It queries an *existing* index only; this extension does not create one.
+Before calling it, create the index and populate the vector field yourself (e.g. via `FT.CREATE`
+and `HSET`), then query with a client-side embedding:
+
+```json
+{
+  "index": "idx:docs",
+  "vectorField": "embedding",
+  "vector": [0.012, -0.34, 0.98, ...],
+  "topK": 5,
+  "returnFields": ["title", "text"]
+}
+```
+
+`vector` is packed client-side into the little-endian FLOAT32 blob the module expects, so the
+indexed vector field's `TYPE` must be `FLOAT32` (the default). If the Valkey server doesn't have
+`valkey-search` loaded, or `index` doesn't exist, Valkey returns an error which this endpoint
+surfaces as a `400`.
 
 ## Lifecycle (start/stop)
 
@@ -134,13 +167,15 @@ Agent's context invokes automatically on refresh/close - no explicit wiring need
 registering the bean:
 
 - **`start()`** - runs once, right after the Agent constructs this bean and injects `Environment`
-  (Agent startup, or a hot-reload of `ext/*.jar`). Opens the `JedisPool` eagerly, so a bad
-  `valkeyHost`/`valkeyPort` fails fast in the Agent's startup log instead of silently on the first
-  `/get` request.
+  (Agent startup, or a hot-reload of `ext/*.jar`). Opens the `JedisPool` (used by `/get`, `/set`,
+  `/keys`, `/search`) and a `JedisPooled` search client (used by `/semantic-search`, since Valkey
+  Search commands live on `UnifiedJedis` rather than the plain `Jedis` connection) eagerly, so a
+  bad `valkeyHost`/`valkeyPort` fails fast in the Agent's startup log instead of silently on the
+  first request.
 - **`stop()`** - runs once, when the Agent tears this bean down (shutdown or `ext/*.jar` reload).
-  Closes the pool so its pooled connections and idle-eviction thread don't leak past the
+  Closes both clients so their pooled connections and idle-eviction threads don't leak past the
   extension's lifetime.
-- **`isRunning()`** - reports `true` only while a pool is open (between `start()` and `stop()`).
+- **`isRunning()`** - reports `true` only while both clients are open (between `start()` and `stop()`).
 - **`isAutoStartup()`** - `true`, so `start()` fires automatically on context refresh, same as the
   `@PostConstruct` hook this replaced.
 
@@ -161,8 +196,9 @@ the Workato Connector SDK editor) - it has not been created/saved in any Workato
   the Workato UI, so setting one up means picking the on-prem group whose Agent has this
   extension deployed, plus an `extension_name` field (defaults to `valkey`, matching
   `conf/config.yml`) that resolves the mount path. `test` hits `/health`.
-- **Actions**: `health_check` (`GET /health`), `get_key` (`POST /get`), `list_keys`
-  (`GET /keys?pattern=...`) - one per `ValkeyExtension` endpoint.
+- **Actions**: `health_check` (`GET /health`), `get_key` (`POST /get`), `set_key`
+  (`POST /set`), `set_keys` (`POST /set-batch`), `list_keys` (`GET /keys?pattern=...`),
+  `search_keys` (`GET /search?pattern=...`) - one per `ValkeyExtension` endpoint.
 
 Local test loop, once `gem install workato-connector-sdk`:
 

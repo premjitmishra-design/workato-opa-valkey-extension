@@ -16,4 +16,9 @@ extensions:
 # Once loaded, the extension answers at:
 #   GET  http://localhost/ext/valkey/health
 #   POST http://localhost/ext/valkey/get    { "key": "user:1001:name" }
+#   POST http://localhost/ext/valkey/set    { "key": "user:1001:name", "value": "Ada Lovelace", "ttlSeconds": 60 }
+#   POST http://localhost/ext/valkey/set-batch { "entries": [{ "key": "...", "value": "...", "ttlSeconds": 60 }, ...] }
 #   GET  http://localhost/ext/valkey/keys?pattern=user:*
+#   GET  http://localhost/ext/valkey/search?pattern=user:*
+#   POST http://localhost/ext/valkey/semantic-search { "index": "idx:docs", "vectorField": "embedding", "vector": [0.01, -0.23, ...], "topK": 5 }
+#     (vector/KNN search - requires the valkey-search module and a pre-existing FT.CREATE'd index)

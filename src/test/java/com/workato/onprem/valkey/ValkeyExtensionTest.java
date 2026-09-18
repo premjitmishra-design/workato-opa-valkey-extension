@@ -168,6 +168,120 @@ class ValkeyExtensionTest {
                 .andExpect(jsonPath("$.count").value(2));
     }
 
+    @Test
+    void setCreatesRetrievableKey() throws Exception {
+        mockMvc.perform(post("/set")
+                        .contentType("application/json")
+                        .content("{\"key\":\"cache:greeting\",\"value\":\"hello\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.key").value("cache:greeting"))
+                .andExpect(jsonPath("$.set").value(true))
+                .andExpect(jsonPath("$.ttlSeconds").doesNotExist());
+
+        mockMvc.perform(post("/get")
+                        .contentType("application/json")
+                        .content("{\"key\":\"cache:greeting\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.type").value("string"))
+                .andExpect(jsonPath("$.value").value("hello"));
+    }
+
+    @Test
+    void setWithTtlSecondsAppliesExpiry() throws Exception {
+        mockMvc.perform(post("/set")
+                        .contentType("application/json")
+                        .content("{\"key\":\"cache:session\",\"value\":\"abc123\",\"ttlSeconds\":60}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.ttlSeconds").value(60));
+
+        try (Jedis jedis = new Jedis(
+                System.getProperty("valkeyHost", "127.0.0.1"),
+                Integer.parseInt(System.getProperty("valkeyPort", "6379")))) {
+            long ttl = jedis.ttl("cache:session");
+            assertTrue(ttl > 0 && ttl <= 60, "expected a positive TTL <= 60, got " + ttl);
+        }
+    }
+
+    @Test
+    void setRejectsMissingValue() throws Exception {
+        mockMvc.perform(post("/set")
+                        .contentType("application/json")
+                        .content("{\"key\":\"cache:greeting\"}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("`value` is required"));
+    }
+
+    @Test
+    void setRejectsNonPositiveTtlSeconds() throws Exception {
+        mockMvc.perform(post("/set")
+                        .contentType("application/json")
+                        .content("{\"key\":\"cache:greeting\",\"value\":\"hello\",\"ttlSeconds\":0}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("`ttlSeconds` must be a positive integer"));
+    }
+
+    @Test
+    void setBatchCreatesMultipleKeys() throws Exception {
+        mockMvc.perform(post("/set-batch")
+                        .contentType("application/json")
+                        .content("{\"entries\":["
+                                + "{\"key\":\"cache:batch:1\",\"value\":\"one\"},"
+                                + "{\"key\":\"cache:batch:2\",\"value\":\"two\",\"ttlSeconds\":60}"
+                                + "]}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.count").value(2))
+                .andExpect(jsonPath("$.keys[0]").value("cache:batch:1"))
+                .andExpect(jsonPath("$.keys[1]").value("cache:batch:2"))
+                .andExpect(jsonPath("$.set").value(true));
+
+        mockMvc.perform(post("/get")
+                        .contentType("application/json")
+                        .content("{\"key\":\"cache:batch:1\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.value").value("one"));
+
+        try (Jedis jedis = new Jedis(
+                System.getProperty("valkeyHost", "127.0.0.1"),
+                Integer.parseInt(System.getProperty("valkeyPort", "6379")))) {
+            assertTrue(jedis.ttl("cache:batch:2") > 0, "expected cache:batch:2 to carry a TTL");
+        }
+    }
+
+    @Test
+    void setBatchRejectsEmptyEntries() throws Exception {
+        mockMvc.perform(post("/set-batch")
+                        .contentType("application/json")
+                        .content("{\"entries\":[]}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("`entries` must be a non-empty array"));
+    }
+
+    @Test
+    void setBatchRejectsEntryMissingValue() throws Exception {
+        mockMvc.perform(post("/set-batch")
+                        .contentType("application/json")
+                        .content("{\"entries\":[{\"key\":\"cache:batch:bad\"}]}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("entry `cache:batch:bad` requires a `value`"));
+    }
+
+    @Test
+    void searchReturnsMatchingEntriesWithValues() throws Exception {
+        mockMvc.perform(get("/search").param("pattern", "user:1001:*"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.count").value(2))
+                .andExpect(jsonPath("$.entries[?(@.key == 'user:1001:name')].value").value("Ada Lovelace"))
+                .andExpect(jsonPath("$.entries[?(@.key == 'user:1001:email')].value").value("ada@example.com"));
+    }
+
+    @Test
+    void searchDefaultsToEveryKeyWhenPatternOmitted() throws Exception {
+        mockMvc.perform(get("/search"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.pattern").value("*"))
+                .andExpect(jsonPath("$.entries").isArray());
+    }
+
     /**
      * Exercises the {@link SmartLifecycle} {@code start()}/{@code stop()} hooks directly, on its
      * own short-lived context so it doesn't disturb the shared {@code mockMvc} used above.
